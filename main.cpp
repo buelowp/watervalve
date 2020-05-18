@@ -11,6 +11,7 @@
 
 static void signalHandler(int sig)
 {
+    qDebug() << "Exiting";
     digitalWrite(RELAY_PIN, LOW);
     exit(0);
 }

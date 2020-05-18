@@ -34,8 +34,10 @@ AquariumValve::AquariumValve(const QHostAddress& host, const quint16 port, QObje
     connect(this, SIGNAL(disconnected()), this, SLOT(onDisconnected()));
     connect(this, &AquariumValve::error, this, &AquariumValve::onError);
     connect(this, &AquariumValve::received, this, &AquariumValve::onReceived);
+    connect(this, &AquariumValve::subscribed, this, &AquariumValve::onSubscribed);
 
     setClientId("aquariumvalve");
+    setAutoReconnect(true);
     connectToHost();
     
     m_guard = new QTimer();
@@ -44,8 +46,6 @@ AquariumValve::AquariumValve(const QHostAddress& host, const quint16 port, QObje
     connect(m_heartbeat, SIGNAL(timeout()), this, SLOT(sendHeartBeat()));
     m_heartbeat->setInterval(ONE_SECOND);
     m_heartbeat->start();
-    m_tomorrow = new QTimer();
-    connect(m_tomorrow, SIGNAL(timeout()), this, SLOT(itIsTomorrow()));
 }
 
 AquariumValve::~AquariumValve()
@@ -54,8 +54,11 @@ AquariumValve::~AquariumValve()
 
 void AquariumValve::waterValveShutoff()
 {
+    qDebug() << "Shutting off water due to timer";
     digitalWrite(RELAY_PIN, LOW);
     m_valveOpen = false;
+    m_waitForTomorrow = true;
+    QTimer::singleShot(TWENTYFOUR_HOURS, this, SLOT(itIsTomorrow()));
 }
 
 void AquariumValve::itIsTomorrow()
@@ -76,7 +79,6 @@ void AquariumValve::sendHeartBeat()
     QByteArray payload = QByteArray::fromStdString(hb.dump());
     QMQTT::Message message(0, "aquarium/valve/heartbeat", payload);
     publish(message);
-    qDebug() << payload;
 }
 
 void AquariumValve::onDisconnected()
@@ -85,14 +87,18 @@ void AquariumValve::onDisconnected()
 
 void AquariumValve::onConnected()
 {
-    qDebug() << __FUNCTION__;
-    subscribe("aquarium/base/#", 0);
-    subscribe("aquarium/valve/#", 0);
+    subscribe("aquarium/base/#");
+    subscribe("aquarium/valve/turnon");
+    subscribe("aquarium/valve/turnoff");
 }
 
 void AquariumValve::onError(const QMQTT::ClientError error)
 {
     qDebug() << "MQTT error: " << error;
+}
+
+void AquariumValve::onSubscribed(const QString& topic)
+{
 }
 
 void AquariumValve::onReceived(const QMQTT::Message& message)
@@ -107,6 +113,11 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
         auto json = nlohmann::json::parse(payload.toStdString());
         int level = json["data"]["waterlevel"].get<int>();
         
+        if ((json["sensor"]["1"].get<int>() == 1) || (json["sensor"]["2"].get<int>() == 1)) {
+            qDebug() << "Sensors indicate full, turning off water";
+            waterValveShutoff();
+        }
+
         if (json["trusted"].get<bool>() == false)
             return;
         
@@ -115,12 +126,15 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
         }
         
         if (level >= FULL_THRESHOLD && m_valveOpen) {
+            qDebug() << "Turning water off due to threshold";
             digitalWrite(RELAY_PIN, LOW);
             m_guard->stop();
             m_valveOpen = false;
+
             nlohmann::json json;
             json["state"] = "off";
             json["reason"] = "level";
+
             QByteArray payload = QByteArray::fromStdString(json.dump());
             QMQTT::Message message(0, "aquarium/valve/state", payload);
             publish(message);
@@ -131,11 +145,12 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
             m_valveOpen = true;
             QTimer::singleShot(MAX_RUNTIME, this, SLOT(waterValveShutoff()));
             
+            qDebug() << "Turning water on due to threshold";
             m_guard->stop();
             m_guard->setInterval(ONE_SECOND);
             
             nlohmann::json json;
-            json["state"] = "off";
+            json["state"] = "on";
             json["reason"] = "level";
 
             QByteArray payload = QByteArray::fromStdString(json.dump());
@@ -149,7 +164,11 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
         
         std::cout << "Turning on water, will turn of in " << MAX_RUNTIME << "ms" << std::endl;
         digitalWrite(RELAY_PIN, HIGH);
+
         QTimer::singleShot(MAX_RUNTIME, this, SLOT(waterValveShutoff()));
+        m_guard->stop();
+        m_guard->setInterval(ONE_SECOND);
+
         nlohmann::json json;
         json["state"] = "on";
         json["reason"] = "valve";
@@ -159,7 +178,8 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
         publish(message);
     }
     else if (topic == "aquarium/valve/turnoff") {
-        std::cout << "Turning off water" << std::endl;
+        qDebug() << payload;
+        std::cout << "Turning off water as someone called the valve turnoff" << std::endl;
         digitalWrite(RELAY_PIN, LOW);
         m_guard->stop();
         QTimer::singleShot(TWENTYFOUR_HOURS, this, SLOT(itIsTomorrow()));
@@ -173,9 +193,10 @@ void AquariumValve::onReceived(const QMQTT::Message& message)
         publish(message);
     }
     else if (topic == "aquarium/base/turnoff") {
-        std::cout << "Turning off water" << std::endl;
+        std::cout << "Turning off water because the base said to" << std::endl;
         digitalWrite(RELAY_PIN, LOW);
         QTimer::singleShot(TWENTYFOUR_HOURS, this, SLOT(itIsTomorrow()));
+        m_guard->stop();
         m_waitForTomorrow = true;
         nlohmann::json json;
         json["state"] = "off";

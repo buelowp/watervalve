@@ -53,6 +53,7 @@ public slots:
     void onReceived(const QMQTT::Message& message);
     void onConnected();
     void onDisconnected();
+    void onSubscribed(const QString& topic);
     void onError(const QMQTT::ClientError error);
     void waterValveShutoff();
     void missedWaterLevelMessage();
