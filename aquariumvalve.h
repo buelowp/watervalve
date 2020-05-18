@@ -61,6 +61,8 @@ public slots:
     void itIsTomorrow();
 
 private:
+    void waterValveTurnon();
+
     QTimer *m_guard;
     QTimer *m_heartbeat;
     QTimer *m_tomorrow;
